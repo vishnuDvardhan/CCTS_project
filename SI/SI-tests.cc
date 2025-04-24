@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "SI.h"
 
-// ✅ Test 1: Read-only transaction should never abort
+//  Test 1: Read-only transaction should never abort
 TEST(SnapshotIsolationTest, ReadOnlyAlwaysCommits) {
     SnapshotIsolationManager manager(1);
     std::unordered_map<int, int> view;
@@ -11,7 +11,7 @@ TEST(SnapshotIsolationTest, ReadOnlyAlwaysCommits) {
     ASSERT_TRUE(manager.tryCommit(tx, view));
 }
 
-// ✅ Test 2: Two non-overlapping writers should both commit
+//  Test 2: Two non-overlapping writers should both commit
 TEST(SnapshotIsolationTest, NonOverlappingWritesDoNotConflict) {
     SnapshotIsolationManager manager(2);
     std::unordered_map<int, int> view1, view2;
@@ -24,7 +24,7 @@ TEST(SnapshotIsolationTest, NonOverlappingWritesDoNotConflict) {
     ASSERT_TRUE(manager.tryCommit(tx2, view2));
 }
 
-// ✅ Test 3: T1 commits before T2 starts — no abort
+//  Test 3: T1 commits before T2 starts — no abort
 TEST(SnapshotIsolationTest, T1CommitsBeforeT2Starts_NoConflict) {
     SnapshotIsolationManager manager(1);
     std::unordered_map<int, int> view1, view2;
@@ -37,7 +37,7 @@ TEST(SnapshotIsolationTest, T1CommitsBeforeT2Starts_NoConflict) {
     ASSERT_TRUE(manager.tryCommit(tx2, view2));
 }
 
-// ✅ Test 4: T2 overwrites a value it saw in snapshot — no abort
+//  Test 4: T2 overwrites a value it saw in snapshot — no abort
 TEST(SnapshotIsolationTest, OverwriteSameSeenValue) {
     SnapshotIsolationManager manager(1);
     std::unordered_map<int, int> view1, view2;
@@ -53,7 +53,7 @@ TEST(SnapshotIsolationTest, OverwriteSameSeenValue) {
     ASSERT_TRUE(manager.tryCommit(tx2, view2));
 }
 
-// ✅ Test 5: Only one of two writers to same key should commit
+//  Test 5: Only one of two writers to same key should commit
 TEST(SnapshotIsolationTest, WriteWriteConflictCausesAbort) {
     SnapshotIsolationManager manager(1);
     std::unordered_map<int, int> view1, view2;
@@ -71,7 +71,7 @@ TEST(SnapshotIsolationTest, WriteWriteConflictCausesAbort) {
 }
 
 
-// ❌ Test 6: Write skew anomaly (non-serializable but SI allows it)
+// Test 6: Write skew anomaly (non-serializable but SI allows it)
 // Scenario: T1 reads A and B, writes A; T2 reads A and B, writes B.
 TEST(SnapshotIsolationTest, WriteSkewNotSerializable) {
     SnapshotIsolationManager manager(2); // A = 0, B = 0

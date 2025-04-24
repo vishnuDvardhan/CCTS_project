@@ -7,11 +7,15 @@
 #include <atomic>
 #include <mutex>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <sstream>
-#include <thread>
 #include "SI.h"
+
+std::mutex logMutex;
+std::ofstream logFile;
+
+std::atomic<long long> totalCommitTime{ 0 };
+std::atomic<long long> totalCommitted{ 0 };
+std::atomic<long long> totalAborts{ 0 };
 
 void workerThread(int threadID, SnapshotIsolationManager* manager, int m, int numTrans, int numIters, int constVal, double lambda) {
     static thread_local std::mt19937 rng(std::random_device{}());
@@ -26,38 +30,30 @@ void workerThread(int threadID, SnapshotIsolationManager* manager, int m, int nu
 
         do {
             int txID = manager->beginTrans();
-            std::unordered_map<int, int> localView;
             std::stringstream buffer;
 
             for (int i = 0; i < numIters; i++) {
                 int randInd = distIndex(rng);
                 int randVal = distVal(rng);
 
-                int localVal = 0;
-                manager->readVal(txID, randInd, localVal, localView);
-
+                int localVal = manager->read(txID, randInd);
                 buffer << "Thread " << threadID << " Tx " << txID << " reads idx " << randInd << " val " << localVal << " at time "
                     << std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch())
-                    .count() << "\n";
+                        std::chrono::steady_clock::now().time_since_epoch()).count() << "\n";
 
                 localVal += randVal;
-                manager->writeVal(txID, randInd, localVal, localView);
-
+                manager->write(txID, randInd, localVal);
                 buffer << "Thread " << threadID << " Tx " << txID << " writes idx " << randInd << " val " << localVal << " at time "
                     << std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch())
-                    .count() << "\n";
+                        std::chrono::steady_clock::now().time_since_epoch()).count() << "\n";
 
                 std::this_thread::sleep_for(std::chrono::milliseconds((int)distExp(rng)));
             }
 
-            bool ok = manager->tryCommit(txID, localView);
-
+            bool ok = manager->commit(txID);
             buffer << "Tx " << txID << " tryCommits => " << (ok ? "COMMIT" : "ABORT") << " at time "
                 << std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch())
-                .count() << "\n";
+                    std::chrono::steady_clock::now().time_since_epoch()).count() << "\n";
 
             {
                 std::lock_guard<std::mutex> lk(logMutex);

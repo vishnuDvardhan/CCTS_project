@@ -1,98 +1,116 @@
 #include <gtest/gtest.h>
 #include "SI.h"
 
-//  Test 1: Read-only transaction should never abort
-TEST(SnapshotIsolationTest, ReadOnlyAlwaysCommits) {
+// ✅ Test: Concurrent writers on different keys should not abort
+TEST(SnapshotIsolationTest, ParallelWritersNonConflicting) {
+    SnapshotIsolationManager manager(3);
+
+    int tx1 = manager.beginTrans();
+    int tx2 = manager.beginTrans();
+
+    manager.write(tx1, 0, 10);
+    manager.write(tx2, 1, 20);
+
+    ASSERT_TRUE(manager.commit(tx1));
+    ASSERT_TRUE(manager.commit(tx2));
+}
+
+// ✅ Test: Concurrent writes to same key should cause one to abort
+TEST(SnapshotIsolationTest, ParallelWritersConflicting) {
     SnapshotIsolationManager manager(1);
-    std::unordered_map<int, int> view;
+
+    int tx1 = manager.beginTrans();
+    manager.write(tx1, 0, 10);
+
+    int tx2 = manager.beginTrans();
+    manager.read(tx2, 0); // establish snapshot
+    manager.write(tx2, 0, 20);
+
+    ASSERT_TRUE(manager.commit(tx1));
+    ASSERT_FALSE(manager.commit(tx2));
+}
+
+// ✅ Test: Read-your-writes within same transaction
+TEST(SnapshotIsolationTest, ReadYourWrites) {
+    SnapshotIsolationManager manager(1);
+
     int tx = manager.beginTrans();
-    int val;
-    manager.readVal(tx, 0, val, view);
-    ASSERT_TRUE(manager.tryCommit(tx, view));
+    manager.write(tx, 0, 99);
+    int val = manager.read(tx, 0);
+
+    ASSERT_EQ(val, 99);
+    ASSERT_TRUE(manager.commit(tx));
 }
 
-//  Test 2: Two non-overlapping writers should both commit
-TEST(SnapshotIsolationTest, NonOverlappingWritesDoNotConflict) {
-    SnapshotIsolationManager manager(2);
-    std::unordered_map<int, int> view1, view2;
-    int tx1 = manager.beginTrans();
-    manager.writeVal(tx1, 0, 10, view1);
-    ASSERT_TRUE(manager.tryCommit(tx1, view1));
-
-    int tx2 = manager.beginTrans();
-    manager.writeVal(tx2, 1, 20, view2);
-    ASSERT_TRUE(manager.tryCommit(tx2, view2));
-}
-
-//  Test 3: T1 commits before T2 starts — no abort
-TEST(SnapshotIsolationTest, T1CommitsBeforeT2Starts_NoConflict) {
+// ✅ Test: Read snapshot ignores concurrent uncommitted writes
+TEST(SnapshotIsolationTest, IgnoreUncommittedWritesFromOthers) {
     SnapshotIsolationManager manager(1);
-    std::unordered_map<int, int> view1, view2;
+
     int tx1 = manager.beginTrans();
-    manager.writeVal(tx1, 0, 100, view1);
-    ASSERT_TRUE(manager.tryCommit(tx1, view1));
+    manager.write(tx1, 0, 123); // not yet committed
 
     int tx2 = manager.beginTrans();
-    manager.writeVal(tx2, 0, 200, view2);
-    ASSERT_TRUE(manager.tryCommit(tx2, view2));
+    int val = manager.read(tx2, 0);
+
+    ASSERT_EQ(val, 0); // tx2 sees initial committed state only
+    ASSERT_TRUE(manager.commit(tx2));
+    ASSERT_TRUE(manager.commit(tx1));
 }
 
-//  Test 4: T2 overwrites a value it saw in snapshot — no abort
-TEST(SnapshotIsolationTest, OverwriteSameSeenValue) {
+// ✅ Test: Garbage write (write then overwrite before commit)
+TEST(SnapshotIsolationTest, OverwriteBeforeCommit) {
     SnapshotIsolationManager manager(1);
-    std::unordered_map<int, int> view1, view2;
 
-    int tx1 = manager.beginTrans();
-    manager.writeVal(tx1, 0, 5, view1);
-    ASSERT_TRUE(manager.tryCommit(tx1, view1));
+    int tx = manager.beginTrans();
+    manager.write(tx, 0, 5);
+    manager.write(tx, 0, 10); // overwrites previous write
 
-    int tx2 = manager.beginTrans();
-    int val;
-    manager.readVal(tx2, 0, val, view2); // should see 5
-    manager.writeVal(tx2, 0, 10, view2); // overwrite seen value
-    ASSERT_TRUE(manager.tryCommit(tx2, view2));
+    int val = manager.read(tx, 0);
+    ASSERT_EQ(val, 10);
+    ASSERT_TRUE(manager.commit(tx));
+
+    int check = manager.read(manager.beginTrans(), 0);
+    ASSERT_EQ(check, 10);
 }
 
-//  Test 5: Only one of two writers to same key should commit
-TEST(SnapshotIsolationTest, WriteWriteConflictCausesAbort) {
+// ❌ Test: Write skew — non-serializable anomaly allowed by SI
+TEST(SnapshotIsolationTest, WriteSkewAllowed) {
+    SnapshotIsolationManager manager(2); // two shared booleans A and B initially 0
+
+    int tx1 = manager.beginTrans();
+    int A1 = manager.read(tx1, 0);
+    int B1 = manager.read(tx1, 1);
+    if (A1 == 0 && B1 == 0) manager.write(tx1, 0, 1); // set A = 1 if both 0
+
+    int tx2 = manager.beginTrans();
+    int A2 = manager.read(tx2, 0);
+    int B2 = manager.read(tx2, 1);
+    if (A2 == 0 && B2 == 0) manager.write(tx2, 1, 1); // set B = 1 if both 0
+
+    // Both transactions may commit!
+    ASSERT_TRUE(manager.commit(tx1));
+    ASSERT_TRUE(manager.commit(tx2));
+
+    int A = manager.read(manager.beginTrans(), 0);
+    int B = manager.read(manager.beginTrans(), 1);
+    ASSERT_EQ(A, 1);
+    ASSERT_EQ(B, 1);
+
+    // This final state (A=1, B=1) would be impossible under serializable schedules
+    // but is allowed under SI — classic write skew
+}
+
+// ✅ Test: Write-write conflict should cause abort in SI
+TEST(SnapshotIsolationTest, WriteWriteConflictShouldAbort) {
     SnapshotIsolationManager manager(1);
-    std::unordered_map<int, int> view1, view2;
 
     int tx1 = manager.beginTrans();
-    manager.writeVal(tx1, 0, 1, view1);
+    manager.write(tx1, 0, 10);
 
     int tx2 = manager.beginTrans();
-    int dummy;
-    manager.readVal(tx2, 0, dummy, view2); // snapshot
+    manager.read(tx2, 0); // snapshot before tx1 commit
+    manager.write(tx2, 0, 20);
 
-    ASSERT_TRUE(manager.tryCommit(tx1, view1));
-    manager.writeVal(tx2, 0, 2, view2);
-    ASSERT_FALSE(manager.tryCommit(tx2, view2));
-}
-
-
-// Test 6: Write skew anomaly (non-serializable but SI allows it)
-// Scenario: T1 reads A and B, writes A; T2 reads A and B, writes B.
-TEST(SnapshotIsolationTest, WriteSkewNotSerializable) {
-    SnapshotIsolationManager manager(2); // A = 0, B = 0
-
-    std::unordered_map<int, int> view1, view2;
-
-    int tx1 = manager.beginTrans();
-    int a1, b1;
-    manager.readVal(tx1, 0, a1, view1); // read A
-    manager.readVal(tx1, 1, b1, view1); // read B
-    if (a1 == 0 && b1 == 0) manager.writeVal(tx1, 0, 1, view1); // set A=1
-
-    int tx2 = manager.beginTrans();
-    int a2, b2;
-    manager.readVal(tx2, 0, a2, view2); // read A
-    manager.readVal(tx2, 1, b2, view2); // read B
-    if (a2 == 0 && b2 == 0) manager.writeVal(tx2, 1, 1, view2); // set B=1
-
-    ASSERT_TRUE(manager.tryCommit(tx1, view1));
-    ASSERT_TRUE(manager.tryCommit(tx2, view2));
-
-    // After both commit, we end up with A=1 and B=1 despite both checking that A==0 and B==0
-    // This is not serializable but SI allows it (classic write skew)
+    ASSERT_TRUE(manager.commit(tx1));
+    ASSERT_FALSE(manager.commit(tx2));
 }

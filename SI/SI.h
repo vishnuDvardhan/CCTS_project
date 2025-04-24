@@ -1,23 +1,11 @@
-#include <iostream>
-#include <fstream>
-#include <thread>
-#include <vector>
-#include <random>
-#include <chrono>
-#include <atomic>
-#include <mutex>
-#include <string>
+#pragma once
+
 #include <unordered_map>
 #include <unordered_set>
-#include <sstream>
-#include <thread> // needed for sleep_for
-
-std::mutex logMutex;
-std::ofstream logFile;
-
-std::atomic<long long> totalCommitTime{ 0 };
-std::atomic<long long> totalCommitted{ 0 };
-std::atomic<long long> totalAborts{ 0 };
+#include <vector>
+#include <mutex>
+#include <atomic>
+#include <thread>
 
 struct Version {
     int value;
@@ -27,12 +15,12 @@ struct Version {
 class SnapshotIsolationManager {
 private:
     std::atomic<int> nextTxID{ 1000 };
-    std::atomic<int> globalTS{ 1 }; // unified timestamp counter
+    std::atomic<int> globalTS{ 1 };
     std::mutex dataMutex;
+
     std::unordered_map<int, std::vector<Version>> versionChain;
     std::unordered_map<int, int> txStartTimestamps;
-    std::unordered_map<int, std::unordered_map<int, int>> txWriteHistory;
-    std::unordered_map<int, std::unordered_set<int>> txReadHistory;
+    std::unordered_map<int, std::unordered_map<int, int>> txLocalViews;
 
 public:
     SnapshotIsolationManager(int m) {
@@ -43,57 +31,54 @@ public:
 
     int beginTrans() {
         int txID = nextTxID.fetch_add(1);
-        int start_ts = globalTS.fetch_add(1); // unified timestamp
-        txStartTimestamps[txID] = start_ts;
+        int ts = globalTS.fetch_add(1);
+        txStartTimestamps[txID] = ts;
+        txLocalViews[txID] = {};
         return txID;
     }
 
-    int getStartTimestamp(int txID) {
-        return txStartTimestamps[txID];
-    }
-
-    void readVal(int txID, int index, int& localVal, std::unordered_map<int, int>& localView) {
-        txReadHistory[txID].insert(index);
-
-        int start_ts = getStartTimestamp(txID);
+    int read(int txID, int index) {
+        auto& localView = txLocalViews[txID];
         if (localView.find(index) != localView.end()) {
-            localVal = localView[index];
-            return;
+            return localView[index];
         }
 
+        int start_ts = txStartTimestamps[txID];
         std::lock_guard<std::mutex> lk(dataMutex);
         for (auto it = versionChain[index].rbegin(); it != versionChain[index].rend(); ++it) {
             if (it->commit_ts <= start_ts) {
-                localVal = it->value;
-                return;
+                return it->value;
             }
         }
-        localVal = 0;
+        return 0; // fallback
     }
 
-    void writeVal(int txID, int index, int val, std::unordered_map<int, int>& localView) {
-        localView[index] = val;
-        txWriteHistory[txID][index] = val;
+    void write(int txID, int index, int val) {
+        txLocalViews[txID][index] = val;
     }
 
-    bool tryCommit(int txID, std::unordered_map<int, int>& localView) {
-        int start_ts = getStartTimestamp(txID);
+    bool commit(int txID) {
+        int start_ts = txStartTimestamps[txID];
+        auto& localView = txLocalViews[txID];
 
         std::lock_guard<std::mutex> lk(dataMutex);
+
+        // Conflict check
         for (const auto& [index, _] : localView) {
-            const auto& versions = versionChain[index];
-            for (const auto& v : versions) {
+            for (const auto& v : versionChain[index]) {
                 if (v.commit_ts > start_ts) {
-                    return false;
+                    return false; // write-write conflict
                 }
             }
         }
 
-        int commit_ts = globalTS.fetch_add(1); // unified timestamp
-        for (const auto& [index, value] : localView) {
-            versionChain[index].push_back({ value, commit_ts });
+        int commit_ts = globalTS.fetch_add(1);
+        for (const auto& [index, val] : localView) {
+            versionChain[index].push_back({ val, commit_ts });
         }
 
+        txLocalViews.erase(txID);
+        txStartTimestamps.erase(txID);
         return true;
     }
 };

@@ -1,234 +1,195 @@
-// snapshot_isolation_with_ssn.cpp
 #include <iostream>
-#include <vector>
-#include <map>
-#include <unordered_map>
-#include <mutex>
-#include <thread>
-#include <chrono>
-#include <random>
-#include <atomic>
 #include <fstream>
-#include <iomanip>
-#include <sstream>
-#include <limits>
+#include <thread>
+#include <vector>
+#include <random>
+#include <chrono>
+#include <atomic>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
-using namespace std;
-using namespace chrono;
+std::mutex logMutex;
+std::ofstream logFile;
 
-struct Version {
-    int timestamp;
-    int value;
-    int pstamp = 0;  // Latest commit time of any reader (initialized to 0)
-    int sstamp = numeric_limits<int>::max();  // Earliest commit time of overwriter
-};
+std::atomic<long long> totalCommitTime{ 0 };
+std::atomic<long long> totalCommitted{ 0 };
+std::atomic<long long> totalAborts{ 0 };
 
-class DataItem {
+class SnapshotIsolationManager {
+private:
+    std::atomic<int> nextTxID{ 1000 };
+    std::mutex dataMutex;
+    std::vector<std::unordered_map<int, int>> committedVersions;
+
 public:
-    vector<Version> versions;
-    mutex mtx;
+    SnapshotIsolationManager(int m) : committedVersions(1) {
+        committedVersions[0].reserve(m);
+        for (int i = 0; i < m; ++i) committedVersions[0][i] = 0;
+    }
 
-    int getLatestValueBefore(int ts, Version& outVersion) {
-        lock_guard<mutex> lock(mtx);
-        for (int i = versions.size() - 1; i >= 0; --i) {
-            if (versions[i].timestamp <= ts) {
-                outVersion = versions[i];
-                return versions[i].value;
-            }
+    int beginTrans() {
+        return nextTxID.fetch_add(1);
+    }
+
+    void readVal(int txID, int index, int& localVal, std::unordered_map<int, int>& localView) {
+        if (localView.find(index) != localView.end()) {
+            localVal = localView[index];
+            return;
         }
-        return -1;
+
+        std::lock_guard<std::mutex> lk(dataMutex);
+        localVal = committedVersions.back()[index];
     }
 
-    void appendVersion(Version v) {
-        lock_guard<mutex> lock(mtx);
-        versions.push_back(v);
+    void writeVal(int txID, int index, int val, std::unordered_map<int, int>& localView) {
+        localView[index] = val;
     }
 
-    Version* getVersionBefore(int ts) {
-        lock_guard<mutex> lock(mtx);
-        for (int i = versions.size() - 1; i >= 0; --i) {
-            if (versions[i].timestamp <= ts) {
-                return &versions[i];
-            }
+    bool tryCommit(int txID, std::unordered_map<int, int>& localView) {
+        static thread_local std::mt19937 rng(std::random_device{}());
+        std::uniform_int_distribution<int> dist(0, 3);
+        bool commitDecision = (dist(rng) != 0);
+
+        if (!commitDecision) return false;
+
+        std::lock_guard<std::mutex> lk(dataMutex);
+        auto newVersion = committedVersions.back();
+        for (const auto& [idx, val] : localView) {
+            newVersion[idx] = val;
         }
-        return nullptr;
-    }
-};
-
-struct Transaction {
-    int id;
-    int start_ts;
-    int cstamp;
-    int pstamp = 0;  // initialized to 0 instead of -1
-    int sstamp = numeric_limits<int>::max();
-    unordered_map<int, int> localWrites;
-    vector<pair<int, Version>> readSet;
-};
-
-class SSNManager {
-public:
-    atomic<int> global_ts{ 0 };
-    atomic<int> next_tid{ 0 };
-    vector<DataItem> database;
-
-    SSNManager(int num_vars) : database(num_vars) {}
-
-    Transaction begin_trans() {
-        int ts = global_ts++;
-        return Transaction{ next_tid++, ts };
-    }
-
-    bool read(Transaction& T, int x, int& l) {
-        if (T.localWrites.find(x) != T.localWrites.end()) {
-            l = T.localWrites[x];
-            return true;
-        }
-        Version v;
-        l = database[x].getLatestValueBefore(T.start_ts, v);
-        T.pstamp = max(T.pstamp, v.timestamp);
-        T.sstamp = min(T.sstamp, v.sstamp);
-        T.readSet.emplace_back(x, v);
+        committedVersions.push_back(std::move(newVersion));
         return true;
     }
-
-    void write(Transaction& T, int x, int l) {
-        T.localWrites[x] = l;
-    }
-
-    char try_commit(Transaction& T) {
-        T.cstamp = global_ts++;
-
-        for (auto& [x, val] : T.localWrites) {
-            Version* prev = database[x].getVersionBefore(T.start_ts);
-            if (prev) T.pstamp = max(T.pstamp, prev->pstamp);
-        }
-
-        T.sstamp = min(T.sstamp, T.cstamp);
-        for (auto& [x, v] : T.readSet) {
-            T.sstamp = min(T.sstamp, v.sstamp);
-        }
-
-        if (T.sstamp <= T.pstamp) return 'a';
-
-        for (auto& [x, v] : T.readSet) {
-            Version* version = database[x].getVersionBefore(T.start_ts);
-            if (version) version->pstamp = max(version->pstamp, T.cstamp);
-        }
-
-        for (auto& [x, val] : T.localWrites) {
-            Version* prev = database[x].getVersionBefore(T.start_ts);
-            if (prev) prev->sstamp = min(prev->sstamp, T.sstamp);
-
-            Version newVersion;
-            newVersion.timestamp = T.cstamp;
-            newVersion.value = val;
-            newVersion.pstamp = T.cstamp;
-            newVersion.sstamp = numeric_limits<int>::max();
-
-            database[x].appendVersion(newVersion);
-        }
-
-        return 'c';
-    }
 };
 
+void workerThread(int threadID, SnapshotIsolationManager* manager, int m, int numTrans, int numIters, int constVal, double lambda) {
+    static thread_local std::mt19937 rng(std::random_device{}());
+    std::uniform_int_distribution<int> distIndex(0, m - 1);
+    std::uniform_int_distribution<int> distVal(0, constVal);
+    std::exponential_distribution<double> distExp(1.0 / lambda);
 
-// === Threaded Simulation and Metrics ===
-ofstream logFile("si_output.txt");
-ofstream resultFile("si_result.txt");
-mutex resultMutex;
-int totalAborts = 0;
-long long totalCommitDelay = 0;
+    for (int t = 0; t < numTrans; t++) {
+        auto critStartTime = std::chrono::steady_clock::now();
+        bool committed = false;
+        int abortCount = 0;
 
-int getRand(int maxVal) {
-    static thread_local mt19937 gen(random_device{}());
-    uniform_int_distribution<int> dist(0, maxVal - 1);
-    return dist(gen);
-}
+        do {
+            int txID = manager->beginTrans();
+            std::unordered_map<int, int> localView;
 
-float getFloatRand() {
-    static thread_local mt19937 gen(random_device{}());
-    uniform_real_distribution<float> dist(0.0, 1.0);
-    return dist(gen);
-}
+            for (int i = 0; i < numIters; i++) {
+                int randInd = distIndex(rng);
+                int randVal = distVal(rng);
 
-int getExpRand(int lambda_ms) {
-    static thread_local mt19937 gen(random_device{}());
-    exponential_distribution<float> dist(1.0 / lambda_ms);
-    return static_cast<int>(dist(gen));
-}
+                int localVal = 0;
+                manager->readVal(txID, randInd, localVal, localView);
 
-string getSysTime() {
-    auto now = system_clock::now();
-    auto t_c = system_clock::to_time_t(now);
-    ostringstream oss;
-    tm* timeinfo = localtime(&t_c);
-    oss << setw(2) << setfill('0') << timeinfo->tm_hour << ":"
-        << setw(2) << setfill('0') << timeinfo->tm_min << ":"
-        << setw(2) << setfill('0') << timeinfo->tm_sec;
-    return oss.str();
-}
+                {
+                    std::lock_guard<std::mutex> lk(logMutex);
+                    logFile << "Thread " << threadID
+                        << " Tx " << txID
+                        << " reads idx " << randInd
+                        << " val " << localVal
+                        << " at time "
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count()
+                        << "\n";
+                }
 
-void updtMem(SSNManager& sim, int tid, int m, int constVal, int lambda, float readRatio) {
-    char status = 'a';
-    int abortCnt = 0;
-    bool readOnly = getFloatRand() < readRatio;
-    auto critStart = high_resolution_clock::now();
-
-    do {
-        Transaction T = sim.begin_trans();
-        int randIters = getRand(m) + 1;
-
-        for (int i = 0; i < randIters; ++i) {
-            int randInd = getRand(m);
-            int randVal = getRand(constVal);
-            int localVal;
-
-            sim.read(T, randInd, localVal);
-            logFile << "Thread " << tid << " Transaction " << T.id << " reads " << randInd << " a value " << localVal << " at time " << getSysTime() << endl;
-
-            if (!readOnly) {
                 localVal += randVal;
-                sim.write(T, randInd, localVal);
-                logFile << "Thread " << tid << " Transaction " << T.id << " writes to " << randInd << " a value " << localVal << " at time " << getSysTime() << endl;
+                manager->writeVal(txID, randInd, localVal, localView);
+
+                {
+                    std::lock_guard<std::mutex> lk(logMutex);
+                    logFile << "Thread " << threadID
+                        << " Tx " << txID
+                        << " writes idx " << randInd
+                        << " val " << localVal
+                        << " at time "
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count()
+                        << "\n";
+                }
+
+                double sleep_ms = distExp(rng);
+                std::this_thread::sleep_for(std::chrono::milliseconds((int)sleep_ms));
             }
 
-            this_thread::sleep_for(milliseconds(getExpRand(lambda)));
-        }
+            bool ok = manager->tryCommit(txID, localView);
 
-        status = sim.try_commit(T);
-        logFile << "Transaction " << T.id << " tryCommits with result " << (status == 'c' ? "commit" : "abort") << " at time " << getSysTime() << endl;
-        if (status == 'a') abortCnt++;
-    } while (status != 'c');
+            {
+                std::lock_guard<std::mutex> lk(logMutex);
+                logFile << "Tx " << txID
+                    << " tryCommits => " << (ok ? "COMMIT" : "ABORT")
+                    << " at time "
+                    << std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count()
+                    << "\n";
+            }
 
-    auto critEnd = high_resolution_clock::now();
-    auto duration = duration_cast<milliseconds>(critEnd - critStart).count();
+            if (ok) committed = true;
+            else abortCount++;
 
-    logFile << "Thread " << tid << " Transaction finished with commitDelay = " << duration << " ms and aborts = " << abortCnt << endl;
+        } while (!committed);
 
-    lock_guard<mutex> lock(resultMutex);
-    totalAborts += abortCnt;
-    totalCommitDelay += duration;
+        auto critEndTime = std::chrono::steady_clock::now();
+        long long commitDelay = std::chrono::duration_cast<std::chrono::milliseconds>(critEndTime - critStartTime).count();
+        totalCommitTime.fetch_add(commitDelay);
+        totalCommitted.fetch_add(1);
+        totalAborts.fetch_add(abortCount);
+    }
 }
 
 int main() {
-    ifstream infile("inp-params.txt");
-    int n, m, constVal, lambda;
-    float readRatio;
-    infile >> n >> m >> constVal >> lambda >> readRatio;
-
-    SSNManager sim(m);
-    vector<thread> threads;
-
-    for (int i = 0; i < n; ++i) {
-        threads.emplace_back(updtMem, ref(sim), i, m, constVal, lambda, readRatio);
+    std::ifstream fin("inp-params.txt");
+    if (!fin.is_open()) {
+        std::cerr << "Error: Could not open inp-params.txt\n";
+        return 1;
     }
 
-    for (auto& t : threads) t.join();
+    int n, m, numTrans, constVal, numIters;
+    double lambda;
+    fin >> n >> m >> numTrans >> constVal >> numIters >> lambda;
+    std::cout << "n: " << n << ", m: " << m << ", numTrans: " << numTrans
+        << ", constVal: " << constVal << ", numIters: " << numIters
+        << ", lambda: " << lambda << "\n";
+    fin.close();
 
-    resultFile << "Total Aborts: " << totalAborts << endl;
-    resultFile << "Average Aborts per Transaction: " << (double)totalAborts / n << endl;
-    resultFile << "Average Commit Delay (ms): " << (double)totalCommitDelay / n << endl;
+    logFile.open("si_log.txt");
+    if (!logFile.is_open()) {
+        std::cerr << "Error: Could not open si_log.txt\n";
+        return 1;
+    }
+
+    SnapshotIsolationManager manager(m);
+    std::vector<std::thread> threads;
+    threads.reserve(n);
+    for (int i = 0; i < n; i++) {
+        threads.emplace_back(workerThread, i + 1, &manager, m, numTrans, numIters, constVal, lambda);
+    }
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    long long committedCount = totalCommitted.load();
+    double avgDelay = 0.0, avgAborts = 0.0;
+    if (committedCount > 0) {
+        avgDelay = (double)totalCommitTime.load() / committedCount;
+        avgAborts = (double)totalAborts.load() / committedCount;
+    }
+
+    logFile << "-----------------------------\n";
+    logFile << "Average commit delay (ms): " << avgDelay << "\n";
+    logFile << "Average abort count:       " << avgAborts << "\n";
+    logFile.close();
+
+    std::ofstream fout("si_result.txt");
+    if (fout.is_open()) {
+        fout << "Average commit delay (ms): " << avgDelay << "\n";
+        fout << "Average abort count:       " << avgAborts << "\n";
+        fout.close();
+    }
 
     return 0;
 }

@@ -1,0 +1,2 @@
+Average commit delay (ms): 365.969
+Average abort count:       2.807

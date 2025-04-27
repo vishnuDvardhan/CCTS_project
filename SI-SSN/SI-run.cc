@@ -17,7 +17,7 @@ std::atomic<long long> totalCommitTime{ 0 };
 std::atomic<long long> totalCommitted{ 0 };
 std::atomic<long long> totalAborts{ 0 };
 
-void workerThread(int threadID, SnapshotIsolationSSNManager* manager, int m, int numTrans, int numIters, int constVal, double lambda) {
+void workerThread(int threadID, SnapshotIsolationManager* manager, int m, int numTrans, int numIters, int constVal, double lambda) {
     static thread_local std::mt19937 rng(std::random_device{}());
     std::uniform_int_distribution<int> distIndex(0, m - 1);
     std::uniform_int_distribution<int> distVal(0, constVal);
@@ -95,7 +95,7 @@ int main() {
         return 1;
     }
 
-    SnapshotIsolationSSNManager manager(m);
+    SnapshotIsolationManager manager(m);
     std::vector<std::thread> threads;
     threads.reserve(n);
     for (int i = 0; i < n; i++) {

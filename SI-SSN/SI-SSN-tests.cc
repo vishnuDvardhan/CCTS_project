@@ -3,7 +3,7 @@
 
 // ✅ Test: Read-only transactions always commit
 TEST(SnapshotIsolationSSNTest, ReadOnlyAlwaysCommits) {
-    SnapshotIsolationSSNManager manager(1);
+    SnapshotIsolationManager manager(1);
     int tx = manager.beginTrans();
     int val = manager.read(tx, 0);
     ASSERT_TRUE(manager.commit(tx));
@@ -11,7 +11,7 @@ TEST(SnapshotIsolationSSNTest, ReadOnlyAlwaysCommits) {
 
 // ✅ Test: Write to disjoint keys can proceed concurrently
 TEST(SnapshotIsolationSSNTest, DisjointWritesNoAbort) {
-    SnapshotIsolationSSNManager manager(2);
+    SnapshotIsolationManager manager(2);
     int tx1 = manager.beginTrans();
     int tx2 = manager.beginTrans();
     manager.write(tx1, 0, 100);
@@ -22,7 +22,7 @@ TEST(SnapshotIsolationSSNTest, DisjointWritesNoAbort) {
 
 // ✅ Test: Write-write conflict must abort one
 TEST(SnapshotIsolationSSNTest, ConflictingWritesMustAbort) {
-    SnapshotIsolationSSNManager manager(1);
+    SnapshotIsolationManager manager(1);
     int tx1 = manager.beginTrans();
     int tx2 = manager.beginTrans();
     manager.write(tx1, 0, 111);
@@ -33,7 +33,7 @@ TEST(SnapshotIsolationSSNTest, ConflictingWritesMustAbort) {
 
 // ✅ Test: Classic Write Skew — must abort at least one
 TEST(SnapshotIsolationSSNTest, WriteSkewShouldBeAborted) {
-    SnapshotIsolationSSNManager manager(2); // two variables: x and y
+    SnapshotIsolationManager manager(2); // two variables: x and y
 
     // Initial values: x = 1, y = 1
     {
@@ -70,7 +70,7 @@ TEST(SnapshotIsolationSSNTest, WriteSkewShouldBeAborted) {
 
 // ✅ Test: Read-your-write correctness
 TEST(SnapshotIsolationSSNTest, ReadYourWrites) {
-    SnapshotIsolationSSNManager manager(1);
+    SnapshotIsolationManager manager(1);
     int tx = manager.beginTrans();
     manager.write(tx, 0, 55);
     int val = manager.read(tx, 0);
@@ -80,7 +80,7 @@ TEST(SnapshotIsolationSSNTest, ReadYourWrites) {
 
 // ✅ Test: Ignore uncommitted writes from others
 TEST(SnapshotIsolationSSNTest, UncommittedWriteInvisible) {
-    SnapshotIsolationSSNManager manager(1);
+    SnapshotIsolationManager manager(1);
     int tx1 = manager.beginTrans();
     manager.write(tx1, 0, 123); // not committed
 

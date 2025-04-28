@@ -8,7 +8,7 @@
 #include <mutex>
 #include <string>
 #include <sstream>
-#include "SI.h" // Your SnapshotIsolationSSNManager header
+#include "SI-SSN.h" // Your SnapshotIsolationSSNManager header
 
 std::mutex logMutex;
 std::ofstream logFile;
@@ -111,9 +111,6 @@ int main() {
         return 1;
     }
 
-    // Add program start time measurement
-    auto programStartTime = std::chrono::steady_clock::now();
-
     SnapshotIsolationManager manager(m);
     std::vector<std::thread> threads;
     threads.reserve(n);
@@ -125,38 +122,22 @@ int main() {
         th.join();
     }
 
-    // Add program end time measurement
-    auto programEndTime = std::chrono::steady_clock::now();
-    double executionTimeSeconds = std::chrono::duration_cast<std::chrono::milliseconds>(
-        programEndTime - programStartTime).count() / 1000.0;
-
     long long committedCount = totalCommitted.load();
-    long long abortedCount = totalAborts.load();
     double avgDelay = 0.0, avgAborts = 0.0;
-    double commitsPerSecond = 0.0, abortsPerSecond = 0.0;
-
     if (committedCount > 0) {
         avgDelay = (double)totalCommitTime.load() / committedCount;
-        avgAborts = (double)abortedCount / committedCount;
-        commitsPerSecond = committedCount / executionTimeSeconds;
-        abortsPerSecond = abortedCount / executionTimeSeconds;
+        avgAborts = (double)totalAborts.load() / committedCount;
     }
 
     logFile << "-----------------------------\n";
     logFile << "Average commit delay (ms): " << avgDelay << "\n";
     logFile << "Average abort count:       " << avgAborts << "\n";
-    logFile << "Execution time (s):        " << executionTimeSeconds << "\n";
-    logFile << "Commits per second:        " << commitsPerSecond << "\n";
-    logFile << "Aborts per second:         " << abortsPerSecond << "\n";
     logFile.close();
 
     std::ofstream fout("si_result.txt");
     if (fout.is_open()) {
         fout << "Average commit delay (ms): " << avgDelay << "\n";
         fout << "Average abort count:       " << avgAborts << "\n";
-        fout << "Execution time (s):        " << executionTimeSeconds << "\n";
-        fout << "Commits per second:        " << commitsPerSecond << "\n";
-        fout << "Aborts per second:         " << abortsPerSecond << "\n";
         fout.close();
     }
 
